@@ -66,13 +66,11 @@ public class MaintenanceSyncFunction(
             "Matched case {IncidentId} ('{Title}') to owner {Auth0UserId} via property {PropertyId}.",
             incident.IncidentId, incident.Title, ownerInfo.Auth0UserId, ownerInfo.PropertyId);
 
-        var status = incident.StateCode == 1 ? "Resolved"
-            : incident.StatusCode == 3 ? "Awaiting Owner Response"
-            : "In Progress";
+        var status = incident.StateCode == 1 ? "Resolved" : "In Progress";
 
         var isNew = await UpsertMaintenanceRequestAsync(connection, incident, ownerInfo, status, cancellationToken);
 
-        if (isNew && status == "Awaiting Owner Response")
+        if (isNew)
         {
             await SendOwnerEmailAsync(incident, ownerInfo, customerName, cancellationToken);
         }
@@ -376,9 +374,9 @@ public class MaintenanceSyncFunction(
     private async Task WriteApprovalsToDynamicsAsync(string dynamicsUrl, string token, string sqlConnectionString, CancellationToken cancellationToken)
     {
         const string selectSql = """
-            SELECT Id, DynamicsCaseId, Status, OwnerComments, PropertyId, CaseTitle, CaseNumber
+            SELECT Id, DynamicsCaseId, OwnerApprovalStatus AS Status, OwnerComments, PropertyId, CaseTitle, CaseNumber
             FROM MaintenanceRequests
-            WHERE (Status = 'Approved' OR Status = 'Declined')
+            WHERE (OwnerApprovalStatus = 'Approved' OR OwnerApprovalStatus = 'Declined')
             AND SyncedToDynamics = 0
             """;
 
@@ -413,10 +411,10 @@ public class MaintenanceSyncFunction(
         {
             try
             {
-                var statusCode = approval.Status == "Approved" ? 915370002 : 915370003;
+                var approvalStatusCode = approval.Status == "Approved" ? 915370002 : 915370003;
                 var body = JsonSerializer.Serialize(new
                 {
-                    crd9b_ownerapprovalstatus = statusCode,
+                    crd9b_ownerapprovalstatus = approvalStatusCode,
                     crd9b_ownercomments = approval.OwnerComments
                 });
 
