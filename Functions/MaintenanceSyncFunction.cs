@@ -192,8 +192,8 @@ public class MaintenanceSyncFunction(
 
             logger.LogInformation("Sent owner approval email to {OwnerEmail} for case {IncidentId}", ownerEmail, incident.IncidentId);
 
-            var timestampA = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
-            var notetextA = $"Approval requested via Owner Portal.\n\nEmail notification sent to owner at {timestampA} UTC.\n\nEmail sent:\n---\n{body}\n---";
+            var timestampA = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("AUS Eastern Standard Time")).ToString("yyyy-MM-dd HH:mm:ss AEST");
+            var notetextA = $"Approval requested via Owner Portal.\n\nEmail notification sent to owner at {timestampA}.\n\nEmail sent:\n---\n{body}\n---";
             await PostDynamicsAnnotationAsync(dynamicsUrl, dynamicsToken, "Approval Requested - Owner Portal", notetextA, incident.IncidentId, cancellationToken);
         }
         catch (Exception ex)
@@ -451,8 +451,8 @@ public class MaintenanceSyncFunction(
                     "Successfully wrote {Status} decision for MaintenanceRequest {Id} (Dynamics case {DynamicsCaseId})",
                     approval.Status, approval.Id, approval.DynamicsCaseId);
 
-                var timestampB = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
-                var notetextB = $"Owner decision received via Owner Portal.\n\nDecision: {approval.Status}\nComment: {approval.OwnerComments}\nTimestamp: {timestampB} UTC";
+                var timestampB = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("AUS Eastern Standard Time")).ToString("yyyy-MM-dd HH:mm:ss AEST");
+                var notetextB = $"Owner decision received via Owner Portal.\n\nDecision: {approval.Status}\nComment: {approval.OwnerComments}\nTimestamp: {timestampB}";
                 await PostDynamicsAnnotationAsync(dynamicsUrl, token, "Owner Decision Received - Owner Portal", notetextB, approval.DynamicsCaseId, cancellationToken);
 
                 var propertyName = await GetPropertyNameAsync(connection, approval.PropertyId, cancellationToken);
