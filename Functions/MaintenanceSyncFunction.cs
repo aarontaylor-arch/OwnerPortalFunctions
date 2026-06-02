@@ -32,6 +32,8 @@ public class MaintenanceSyncFunction(
         {
             await ProcessCaseAsync(incident, sqlConnectionString, cancellationToken);
         }
+
+        await WriteApprovalsToDynamicsAsync(dynamicsConfig.Url, token, sqlConnectionString, cancellationToken);
     }
 
     private async Task ProcessCaseAsync(DynamicsCase incident, string sqlConnectionString, CancellationToken cancellationToken)
@@ -192,6 +194,87 @@ public class MaintenanceSyncFunction(
         return tokenResponse.AccessToken;
     }
 
+    private async Task WriteApprovalsToDynamicsAsync(string dynamicsUrl, string token, string sqlConnectionString, CancellationToken cancellationToken)
+    {
+        const string selectSql = """
+            SELECT Id, DynamicsCaseId, Status, OwnerComments
+            FROM MaintenanceRequests
+            WHERE (Status = 'Approved' OR Status = 'Declined')
+            AND SyncedToDynamics = 0
+            """;
+
+        List<PendingApproval> pending = [];
+
+        await using (var connection = new SqlConnection(sqlConnectionString))
+        {
+            await connection.OpenAsync(cancellationToken);
+            await using var cmd = new SqlCommand(selectSql, connection);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                pending.Add(new PendingApproval(
+                    Id: reader.GetInt32(reader.GetOrdinal("Id")),
+                    DynamicsCaseId: reader.GetString(reader.GetOrdinal("DynamicsCaseId")),
+                    Status: reader.GetString(reader.GetOrdinal("Status")),
+                    OwnerComments: reader.IsDBNull(reader.GetOrdinal("OwnerComments")) ? null : reader.GetString(reader.GetOrdinal("OwnerComments"))));
+            }
+        }
+
+        logger.LogInformation("Found {Count} approval decisions to write back to Dynamics", pending.Count);
+
+        var client = httpClientFactory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        client.DefaultRequestHeaders.Add("OData-MaxVersion", "4.0");
+        client.DefaultRequestHeaders.Add("OData-Version", "4.0");
+
+        foreach (var approval in pending)
+        {
+            try
+            {
+                var statusCode = approval.Status == "Approved" ? 915370002 : 915370003;
+                var body = JsonSerializer.Serialize(new
+                {
+                    crd9b_ownerapprovalstatus = statusCode,
+                    crd9b_ownercomments = approval.OwnerComments
+                });
+
+                var patchUrl = $"{dynamicsUrl.TrimEnd('/')}/api/data/v9.2/incidents({approval.DynamicsCaseId})";
+                var request = new HttpRequestMessage(HttpMethod.Patch, patchUrl)
+                {
+                    Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json")
+                };
+
+                var response = await client.SendAsync(request, cancellationToken);
+
+                if (response.StatusCode != System.Net.HttpStatusCode.NoContent)
+                {
+                    var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                    logger.LogError(
+                        "Failed to PATCH Dynamics case {DynamicsCaseId} for MaintenanceRequest {Id}: {Status} {Body}",
+                        approval.DynamicsCaseId, approval.Id, (int)response.StatusCode, errorBody);
+                    continue;
+                }
+
+                await using var connection = new SqlConnection(sqlConnectionString);
+                await connection.OpenAsync(cancellationToken);
+                const string updateSql = "UPDATE MaintenanceRequests SET SyncedToDynamics = 1, UpdatedAt = GETUTCDATE() WHERE Id = @Id";
+                await using var updateCmd = new SqlCommand(updateSql, connection);
+                updateCmd.Parameters.AddWithValue("@Id", approval.Id);
+                await updateCmd.ExecuteNonQueryAsync(cancellationToken);
+
+                logger.LogInformation(
+                    "Successfully wrote {Status} decision for MaintenanceRequest {Id} (Dynamics case {DynamicsCaseId})",
+                    approval.Status, approval.Id, approval.DynamicsCaseId);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex,
+                    "Unexpected error writing approval for MaintenanceRequest {Id} (Dynamics case {DynamicsCaseId})",
+                    approval.Id, approval.DynamicsCaseId);
+            }
+        }
+    }
+
     private static DynamicsConfig ParseDynamicsConnectionString(string connectionString)
     {
         var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -217,6 +300,7 @@ public class MaintenanceSyncFunction(
 
     private sealed record DynamicsConfig(string Url, string ClientId, string ClientSecret);
     private sealed record OwnerInfo(string Auth0UserId, string PropertyId);
+    private sealed record PendingApproval(int Id, string DynamicsCaseId, string Status, string? OwnerComments);
 
     private sealed class DynamicsResponse
     {
