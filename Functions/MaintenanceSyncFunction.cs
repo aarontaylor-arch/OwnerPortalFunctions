@@ -123,12 +123,14 @@ public class MaintenanceSyncFunction(
     {
         try
         {
+            logger.LogInformation("SendOwnerEmailAsync: retrieving owner email from Auth0 for user {Auth0UserId} (case {IncidentId})", ownerInfo.Auth0UserId, incident.IncidentId);
             var ownerEmail = await GetOwnerEmailFromAuth0Async(ownerInfo.Auth0UserId, cancellationToken);
             if (ownerEmail is null)
             {
                 logger.LogWarning("Could not retrieve email for Auth0 user {Auth0UserId}, skipping owner email.", ownerInfo.Auth0UserId);
                 return;
             }
+            logger.LogInformation("SendOwnerEmailAsync: retrieved owner email '{OwnerEmail}' for Auth0 user {Auth0UserId}", ownerEmail, ownerInfo.Auth0UserId);
 
             var tenantId = Environment.GetEnvironmentVariable("DynamicsTenantId")
                 ?? throw new InvalidOperationException("DynamicsTenantId is not configured.");
@@ -137,7 +139,9 @@ public class MaintenanceSyncFunction(
             var graphClientSecret = Environment.GetEnvironmentVariable("GraphClientSecret")
                 ?? throw new InvalidOperationException("GraphClientSecret is not configured.");
 
+            logger.LogInformation("SendOwnerEmailAsync: requesting Graph API token (tenantId={TenantId}, clientId={ClientId})", tenantId, graphClientId);
             var graphToken = await GetGraphTokenAsync(tenantId, graphClientId, graphClientSecret, cancellationToken);
+            logger.LogInformation("SendOwnerEmailAsync: Graph API token obtained successfully");
 
             var subject = $"Action Required: Maintenance approval needed for {propertyName}";
             var body = $"A new maintenance request requires your approval.\n\nProperty: {propertyName}\nCase: {incident.CaseNumber} - {incident.Title}\n\nMessage from our team:\n{incident.MessageToOwner}\n\nPlease log in to your Owner Portal to approve or decline:\nhttps://honey-homes-owner-portal.azurewebsites.net";
@@ -156,10 +160,12 @@ public class MaintenanceSyncFunction(
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", graphToken);
 
             var json = JsonSerializer.Serialize(emailPayload);
+            logger.LogInformation("SendOwnerEmailAsync: sending email to {OwnerEmail} for case {IncidentId}", ownerEmail, incident.IncidentId);
             var response = await client.PostAsync(
                 "https://graph.microsoft.com/v1.0/users/clients@bnbmadeeasy.com.au/sendMail",
                 new StringContent(json, System.Text.Encoding.UTF8, "application/json"),
                 cancellationToken);
+            logger.LogInformation("SendOwnerEmailAsync: email send response status {StatusCode} for case {IncidentId}", (int)response.StatusCode, incident.IncidentId);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -172,7 +178,7 @@ public class MaintenanceSyncFunction(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Unexpected error sending owner email for case {IncidentId}", incident.IncidentId);
+            logger.LogError(ex, "Unexpected error sending owner email for case {IncidentId}: {ExceptionMessage}", incident.IncidentId, ex.ToString());
         }
     }
 
@@ -193,10 +199,12 @@ public class MaintenanceSyncFunction(
             ["audience"] = "https://honeyhomes-owner-portal.au.auth0.com/api/v2/"
         };
 
+        logger.LogInformation("GetOwnerEmailFromAuth0Async: requesting Auth0 management token for user {Auth0UserId} (clientId={ClientId})", auth0UserId, clientId);
         var tokenResponse = await client.PostAsync(
             "https://honeyhomes-owner-portal.au.auth0.com/oauth/token",
             new FormUrlEncodedContent(tokenForm),
             cancellationToken);
+        logger.LogInformation("GetOwnerEmailFromAuth0Async: Auth0 token response status {StatusCode}", (int)tokenResponse.StatusCode);
 
         if (!tokenResponse.IsSuccessStatusCode)
         {
@@ -212,12 +220,15 @@ public class MaintenanceSyncFunction(
             logger.LogError("Auth0 management token response missing access_token");
             return null;
         }
+        logger.LogInformation("GetOwnerEmailFromAuth0Async: Auth0 management token obtained successfully");
 
         var encodedUserId = Uri.EscapeDataString(auth0UserId);
+        logger.LogInformation("GetOwnerEmailFromAuth0Async: fetching Auth0 user profile for {Auth0UserId} (encoded: {EncodedUserId})", auth0UserId, encodedUserId);
         var userRequest = new HttpRequestMessage(HttpMethod.Get, $"https://honeyhomes-owner-portal.au.auth0.com/api/v2/users/{encodedUserId}");
         userRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenData.AccessToken);
 
         var userResponse = await client.SendAsync(userRequest, cancellationToken);
+        logger.LogInformation("GetOwnerEmailFromAuth0Async: Auth0 user profile response status {StatusCode} for user {Auth0UserId}", (int)userResponse.StatusCode, auth0UserId);
         if (!userResponse.IsSuccessStatusCode)
         {
             var errorBody = await userResponse.Content.ReadAsStringAsync(cancellationToken);
@@ -227,6 +238,7 @@ public class MaintenanceSyncFunction(
 
         var userContent = await userResponse.Content.ReadAsStringAsync(cancellationToken);
         var user = JsonSerializer.Deserialize<Auth0User>(userContent, JsonOptions);
+        logger.LogInformation("GetOwnerEmailFromAuth0Async: retrieved email '{Email}' for Auth0 user {Auth0UserId}", user?.Email ?? "(null)", auth0UserId);
         return user?.Email;
     }
 
