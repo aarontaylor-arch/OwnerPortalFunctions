@@ -442,10 +442,10 @@ public class MaintenanceSyncFunction(
 
     private async Task SendSlackNotificationAsync(PendingApproval approval, string propertyName, CancellationToken cancellationToken)
     {
-        var webhookUrl = Environment.GetEnvironmentVariable("SlackWebhookUrl");
+        var webhookUrl = Environment.GetEnvironmentVariable("OwnerPortalSlackWebhookUrl");
         if (string.IsNullOrWhiteSpace(webhookUrl))
         {
-            logger.LogWarning("SlackWebhookUrl is not configured, skipping Slack notification.");
+            logger.LogWarning("OwnerPortalSlackWebhookUrl is not configured, skipping Slack notification.");
             return;
         }
 
