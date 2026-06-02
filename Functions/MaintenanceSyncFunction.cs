@@ -30,13 +30,13 @@ public class MaintenanceSyncFunction(
 
         foreach (var incident in cases)
         {
-            await ProcessCaseAsync(incident, sqlConnectionString, cancellationToken);
+            await ProcessCaseAsync(incident, sqlConnectionString, dynamicsConfig.Url, token, cancellationToken);
         }
 
         await WriteApprovalsToDynamicsAsync(dynamicsConfig.Url, token, sqlConnectionString, cancellationToken);
     }
 
-    private async Task ProcessCaseAsync(DynamicsCase incident, string sqlConnectionString, CancellationToken cancellationToken)
+    private async Task ProcessCaseAsync(DynamicsCase incident, string sqlConnectionString, string dynamicsUrl, string dynamicsToken, CancellationToken cancellationToken)
     {
         var customerName = incident.CustomerName;
         if (string.IsNullOrWhiteSpace(customerName))
@@ -72,7 +72,7 @@ public class MaintenanceSyncFunction(
 
         if (isNew)
         {
-            await SendOwnerEmailAsync(incident, ownerInfo, customerName, cancellationToken);
+            await SendOwnerEmailAsync(incident, ownerInfo, customerName, dynamicsUrl, dynamicsToken, cancellationToken);
         }
     }
 
@@ -133,7 +133,7 @@ public class MaintenanceSyncFunction(
         }
     }
 
-    private async Task SendOwnerEmailAsync(DynamicsCase incident, OwnerInfo ownerInfo, string propertyName, CancellationToken cancellationToken)
+    private async Task SendOwnerEmailAsync(DynamicsCase incident, OwnerInfo ownerInfo, string propertyName, string dynamicsUrl, string dynamicsToken, CancellationToken cancellationToken)
     {
         try
         {
@@ -158,8 +158,9 @@ public class MaintenanceSyncFunction(
             logger.LogInformation("SendOwnerEmailAsync: Graph API token obtained successfully");
 
             var estimatedCostStr = incident.ExpectedCost.HasValue ? $"${incident.ExpectedCost:F2}" : "Not yet provided";
+            var descriptionStr = string.IsNullOrWhiteSpace(incident.Description) ? "No description provided" : incident.Description;
             var subject = $"Action Required: Maintenance approval needed for {propertyName}";
-            var body = $"A new maintenance request requires your approval.\n\nProperty: {propertyName}\nCase: {incident.CaseNumber} - {incident.Title}\nExpected Cost: {estimatedCostStr}\n\nMessage from our team:\n{incident.MessageToOwner}\n\nPlease log in to your Owner Portal to approve or decline:\nhttps://honey-homes-owner-portal.azurewebsites.net";
+            var body = $"A new maintenance request requires your approval.\n\nProperty: {propertyName}\nCase: {incident.CaseNumber} - {incident.Title}\nExpected Cost: {estimatedCostStr}\n\nMessage from our team:\n{incident.MessageToOwner}\n\nCase Description:\n{descriptionStr}\n\nIf you'd prefer to discuss this over the phone, please call us on (02) 5325 8561.\n\nPlease log in to your Owner Portal to approve or decline:\nhttps://honey-homes-owner-portal.azurewebsites.net";
 
             var emailPayload = new
             {
@@ -190,6 +191,10 @@ public class MaintenanceSyncFunction(
             }
 
             logger.LogInformation("Sent owner approval email to {OwnerEmail} for case {IncidentId}", ownerEmail, incident.IncidentId);
+
+            var timestampA = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
+            var notetextA = $"Approval requested via Owner Portal.\n\nEmail notification sent to owner at {timestampA} UTC.\n\nEmail sent:\n---\n{body}\n---";
+            await PostDynamicsAnnotationAsync(dynamicsUrl, dynamicsToken, "Approval Requested - Owner Portal", notetextA, incident.IncidentId, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -446,6 +451,10 @@ public class MaintenanceSyncFunction(
                     "Successfully wrote {Status} decision for MaintenanceRequest {Id} (Dynamics case {DynamicsCaseId})",
                     approval.Status, approval.Id, approval.DynamicsCaseId);
 
+                var timestampB = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
+                var notetextB = $"Owner decision received via Owner Portal.\n\nDecision: {approval.Status}\nComment: {approval.OwnerComments}\nTimestamp: {timestampB} UTC";
+                await PostDynamicsAnnotationAsync(dynamicsUrl, token, "Owner Decision Received - Owner Portal", notetextB, approval.DynamicsCaseId, cancellationToken);
+
                 var propertyName = await GetPropertyNameAsync(connection, approval.PropertyId, cancellationToken);
                 await SendSlackNotificationAsync(approval, propertyName, cancellationToken);
             }
@@ -496,6 +505,45 @@ public class MaintenanceSyncFunction(
         catch (Exception ex)
         {
             logger.LogError(ex, "Unexpected error sending Slack notification for MaintenanceRequest {Id}", approval.Id);
+        }
+    }
+
+    private async Task PostDynamicsAnnotationAsync(string dynamicsUrl, string token, string subject, string notetext, string dynamicsCaseId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var annotationDict = new Dictionary<string, string>
+            {
+                ["subject"] = subject,
+                ["notetext"] = notetext,
+                ["objectid_incident@odata.bind"] = $"/incidents({dynamicsCaseId})"
+            };
+            var annotationJson = JsonSerializer.Serialize(annotationDict);
+
+            var annotationClient = httpClientFactory.CreateClient();
+            annotationClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            annotationClient.DefaultRequestHeaders.Add("OData-MaxVersion", "4.0");
+            annotationClient.DefaultRequestHeaders.Add("OData-Version", "4.0");
+
+            var annotationUrl = $"{dynamicsUrl.TrimEnd('/')}/api/data/v9.2/annotations";
+            var annotationResponse = await annotationClient.PostAsync(
+                annotationUrl,
+                new StringContent(annotationJson, System.Text.Encoding.UTF8, "application/json"),
+                cancellationToken);
+
+            if (!annotationResponse.IsSuccessStatusCode)
+            {
+                var errorBody = await annotationResponse.Content.ReadAsStringAsync(cancellationToken);
+                logger.LogError("Failed to post Dynamics annotation '{Subject}' for case {DynamicsCaseId}: {Status} {Body}", subject, dynamicsCaseId, (int)annotationResponse.StatusCode, errorBody);
+            }
+            else
+            {
+                logger.LogInformation("Posted Dynamics annotation '{Subject}' for case {DynamicsCaseId}", subject, dynamicsCaseId);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Unexpected error posting Dynamics annotation '{Subject}' for case {DynamicsCaseId}", subject, dynamicsCaseId);
         }
     }
 
