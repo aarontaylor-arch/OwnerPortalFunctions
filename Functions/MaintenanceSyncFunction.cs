@@ -66,15 +66,19 @@ public class MaintenanceSyncFunction(
             "Matched case {IncidentId} ('{Title}') to owner {Auth0UserId} via property {PropertyId}.",
             incident.IncidentId, incident.Title, ownerInfo.Auth0UserId, ownerInfo.PropertyId);
 
-        var isNew = await UpsertMaintenanceRequestAsync(connection, incident, ownerInfo, cancellationToken);
+        var status = incident.StateCode == 1 ? "Resolved"
+            : incident.StatusCode == 3 ? "Awaiting Owner Response"
+            : "In Progress";
 
-        if (isNew)
+        var isNew = await UpsertMaintenanceRequestAsync(connection, incident, ownerInfo, status, cancellationToken);
+
+        if (isNew && status == "Awaiting Owner Response")
         {
             await SendOwnerEmailAsync(incident, ownerInfo, customerName, cancellationToken);
         }
     }
 
-    private static async Task<bool> UpsertMaintenanceRequestAsync(SqlConnection connection, DynamicsCase incident, OwnerInfo ownerInfo, CancellationToken cancellationToken)
+    private static async Task<bool> UpsertMaintenanceRequestAsync(SqlConnection connection, DynamicsCase incident, OwnerInfo ownerInfo, string status, CancellationToken cancellationToken)
     {
         const string countSql = "SELECT COUNT(*) FROM MaintenanceRequests WHERE DynamicsCaseId = @DynamicsCaseId";
         await using var countCmd = new SqlCommand(countSql, connection);
@@ -87,13 +91,20 @@ public class MaintenanceSyncFunction(
         {
             const string updateSql = """
                 UPDATE MaintenanceRequests
-                SET CaseTitle = @CaseTitle, CaseNumber = @CaseNumber, MessageToOwner = @MessageToOwner, UpdatedAt = @UpdatedAt
+                SET CaseTitle = @CaseTitle, CaseNumber = @CaseNumber, MessageToOwner = @MessageToOwner,
+                    Description = @Description, StatusCode = @StatusCode, StateCode = @StateCode,
+                    EstimatedCost = @EstimatedCost, Status = @Status, UpdatedAt = @UpdatedAt
                 WHERE DynamicsCaseId = @DynamicsCaseId
                 """;
             await using var updateCmd = new SqlCommand(updateSql, connection);
             updateCmd.Parameters.AddWithValue("@CaseTitle", incident.Title);
             updateCmd.Parameters.AddWithValue("@CaseNumber", (object?)incident.CaseNumber ?? DBNull.Value);
             updateCmd.Parameters.AddWithValue("@MessageToOwner", (object?)incident.MessageToOwner ?? DBNull.Value);
+            updateCmd.Parameters.AddWithValue("@Description", (object?)incident.Description ?? DBNull.Value);
+            updateCmd.Parameters.AddWithValue("@StatusCode", (object?)incident.StatusCode ?? DBNull.Value);
+            updateCmd.Parameters.AddWithValue("@StateCode", (object?)incident.StateCode ?? DBNull.Value);
+            updateCmd.Parameters.AddWithValue("@EstimatedCost", (object?)incident.ExpectedCost ?? DBNull.Value);
+            updateCmd.Parameters.AddWithValue("@Status", status);
             updateCmd.Parameters.AddWithValue("@UpdatedAt", now);
             updateCmd.Parameters.AddWithValue("@DynamicsCaseId", incident.IncidentId);
             await updateCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -102,14 +113,19 @@ public class MaintenanceSyncFunction(
         else
         {
             const string insertSql = """
-                INSERT INTO MaintenanceRequests (DynamicsCaseId, CaseTitle, CaseNumber, MessageToOwner, Auth0UserId, PropertyId, CreatedAt, UpdatedAt)
-                VALUES (@DynamicsCaseId, @CaseTitle, @CaseNumber, @MessageToOwner, @Auth0UserId, @PropertyId, @CreatedAt, @UpdatedAt)
+                INSERT INTO MaintenanceRequests (DynamicsCaseId, CaseTitle, CaseNumber, MessageToOwner, Description, StatusCode, StateCode, EstimatedCost, Status, Auth0UserId, PropertyId, CreatedAt, UpdatedAt)
+                VALUES (@DynamicsCaseId, @CaseTitle, @CaseNumber, @MessageToOwner, @Description, @StatusCode, @StateCode, @EstimatedCost, @Status, @Auth0UserId, @PropertyId, @CreatedAt, @UpdatedAt)
                 """;
             await using var insertCmd = new SqlCommand(insertSql, connection);
             insertCmd.Parameters.AddWithValue("@DynamicsCaseId", incident.IncidentId);
             insertCmd.Parameters.AddWithValue("@CaseTitle", incident.Title);
             insertCmd.Parameters.AddWithValue("@CaseNumber", (object?)incident.CaseNumber ?? DBNull.Value);
             insertCmd.Parameters.AddWithValue("@MessageToOwner", (object?)incident.MessageToOwner ?? DBNull.Value);
+            insertCmd.Parameters.AddWithValue("@Description", (object?)incident.Description ?? DBNull.Value);
+            insertCmd.Parameters.AddWithValue("@StatusCode", (object?)incident.StatusCode ?? DBNull.Value);
+            insertCmd.Parameters.AddWithValue("@StateCode", (object?)incident.StateCode ?? DBNull.Value);
+            insertCmd.Parameters.AddWithValue("@EstimatedCost", (object?)incident.ExpectedCost ?? DBNull.Value);
+            insertCmd.Parameters.AddWithValue("@Status", status);
             insertCmd.Parameters.AddWithValue("@Auth0UserId", ownerInfo.Auth0UserId);
             insertCmd.Parameters.AddWithValue("@PropertyId", ownerInfo.PropertyId);
             insertCmd.Parameters.AddWithValue("@CreatedAt", now);
@@ -143,8 +159,9 @@ public class MaintenanceSyncFunction(
             var graphToken = await GetGraphTokenAsync(tenantId, graphClientId, graphClientSecret, cancellationToken);
             logger.LogInformation("SendOwnerEmailAsync: Graph API token obtained successfully");
 
+            var estimatedCostStr = incident.ExpectedCost.HasValue ? $"${incident.ExpectedCost:F2}" : "Not yet provided";
             var subject = $"Action Required: Maintenance approval needed for {propertyName}";
-            var body = $"A new maintenance request requires your approval.\n\nProperty: {propertyName}\nCase: {incident.CaseNumber} - {incident.Title}\n\nMessage from our team:\n{incident.MessageToOwner}\n\nPlease log in to your Owner Portal to approve or decline:\nhttps://honey-homes-owner-portal.azurewebsites.net";
+            var body = $"A new maintenance request requires your approval.\n\nProperty: {propertyName}\nCase: {incident.CaseNumber} - {incident.Title}\nExpected Cost: {estimatedCostStr}\n\nMessage from our team:\n{incident.MessageToOwner}\n\nPlease log in to your Owner Portal to approve or decline:\nhttps://honey-homes-owner-portal.azurewebsites.net";
 
             var emailPayload = new
             {
@@ -304,7 +321,7 @@ public class MaintenanceSyncFunction(
         client.DefaultRequestHeaders.Add("OData-Version", "4.0");
         client.DefaultRequestHeaders.Add("Prefer", "odata.include-annotations=\"OData.Community.Display.V1.FormattedValue\"");
 
-        var url = $"{dynamicsUrl.TrimEnd('/')}/api/data/v9.2/incidents?$select=incidentid,title,ticketnumber,crd9b_messagetoowner,crd9b_ownerapprovalstatus,crd9b_requiresownerapproval,createdon,_customerid_value&$filter=crd9b_requiresownerapproval%20eq%20true%20and%20crd9b_ownerapprovalstatus%20eq%20915370001&$top=5&$orderby=createdon%20desc";
+        var url = $"{dynamicsUrl.TrimEnd('/')}/api/data/v9.2/incidents?$select=incidentid,title,ticketnumber,crd9b_messagetoowner,crd9b_ownerapprovalstatus,crd9b_requiresownerapproval,createdon,_customerid_value,description,statuscode,statecode,crd9b_expectedcost&$filter=crd9b_requiresownerapproval%20eq%20true&$top=5&$orderby=createdon%20desc";
 
         var response = await client.GetAsync(url, cancellationToken);
         if (!response.IsSuccessStatusCode)
@@ -542,6 +559,18 @@ public class MaintenanceSyncFunction(
 
         [JsonPropertyName("_customerid_value@OData.Community.Display.V1.FormattedValue")]
         public string? CustomerName { get; set; }
+
+        [JsonPropertyName("description")]
+        public string? Description { get; set; }
+
+        [JsonPropertyName("statuscode")]
+        public int? StatusCode { get; set; }
+
+        [JsonPropertyName("statecode")]
+        public int? StateCode { get; set; }
+
+        [JsonPropertyName("crd9b_expectedcost")]
+        public decimal? ExpectedCost { get; set; }
     }
 
     private sealed class TokenResponse
