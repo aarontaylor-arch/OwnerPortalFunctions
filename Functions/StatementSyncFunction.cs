@@ -18,41 +18,49 @@ public class StatementSyncFunction(
     [Function("StatementSyncFunction")]
     public async Task Run([TimerTrigger("0 */10 * * * *")] TimerInfo timer, CancellationToken cancellationToken)
     {
-        logger.LogInformation("StatementSyncFunction started at {Time}", DateTime.UtcNow);
-
-        var sqlConnectionString = Environment.GetEnvironmentVariable("SqlConnectionString")
-            ?? throw new InvalidOperationException("SqlConnectionString is not configured.");
-
-        var graphClientId = Environment.GetEnvironmentVariable("GraphClientId")
-            ?? throw new InvalidOperationException("GraphClientId is not configured.");
-
-        var graphClientSecret = Environment.GetEnvironmentVariable("GraphClientSecret")
-            ?? throw new InvalidOperationException("GraphClientSecret is not configured.");
-
-        var blobConnectionString = Environment.GetEnvironmentVariable("BlobStorageConnectionString")
-            ?? throw new InvalidOperationException("BlobStorageConnectionString is not configured.");
-
-        var graphToken = await GetGraphTokenAsync(graphClientId, graphClientSecret, cancellationToken);
-        var messages = await GetDisbursementEmailsAsync(graphToken, cancellationToken);
-
-        logger.LogInformation("Found {Count} 'Disbursement Report' emails", messages.Count);
-
-        var imported = 0;
-
-        foreach (var message in messages)
+        try
         {
-            try
-            {
-                var wasImported = await ProcessMessageAsync(message, graphToken, sqlConnectionString, blobConnectionString, cancellationToken);
-                if (wasImported) imported++;
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Unexpected error processing email {MessageId}: {ExceptionMessage}", message.Id, ex.Message);
-            }
-        }
+            logger.LogInformation("StatementSyncFunction started at {Time}", DateTime.UtcNow);
 
-        logger.LogInformation("StatementSyncFunction complete. Imported {Count} new statements.", imported);
+            var sqlConnectionString = Environment.GetEnvironmentVariable("SqlConnectionString")
+                ?? throw new InvalidOperationException("SqlConnectionString is not configured.");
+
+            var graphClientId = Environment.GetEnvironmentVariable("GraphClientId")
+                ?? throw new InvalidOperationException("GraphClientId is not configured.");
+
+            var graphClientSecret = Environment.GetEnvironmentVariable("GraphClientSecret")
+                ?? throw new InvalidOperationException("GraphClientSecret is not configured.");
+
+            var blobConnectionString = Environment.GetEnvironmentVariable("BlobStorageConnectionString")
+                ?? throw new InvalidOperationException("BlobStorageConnectionString is not configured.");
+
+            var graphToken = await GetGraphTokenAsync(graphClientId, graphClientSecret, cancellationToken);
+            var messages = await GetDisbursementEmailsAsync(graphToken, cancellationToken);
+
+            logger.LogInformation("Found {Count} 'Disbursement Report' emails", messages.Count);
+
+            var imported = 0;
+
+            foreach (var message in messages)
+            {
+                try
+                {
+                    var wasImported = await ProcessMessageAsync(message, graphToken, sqlConnectionString, blobConnectionString, cancellationToken);
+                    if (wasImported) imported++;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Unexpected error processing email {MessageId}: {ExceptionMessage}", message.Id, ex.Message);
+                }
+            }
+
+            logger.LogInformation("StatementSyncFunction complete. Imported {Count} new statements.", imported);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "StatementSyncFunction failed with unhandled exception: {ExceptionType} {ExceptionMessage}", ex.GetType().Name, ex.Message);
+            throw;
+        }
     }
 
     private async Task<bool> ProcessMessageAsync(
